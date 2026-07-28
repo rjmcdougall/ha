@@ -171,7 +171,7 @@ class MideaRS485Component : public PollingComponent {
   bool updating_internal_{false};
   std::string desired_mode_{"Unknown"};
   std::string desired_fan_mode_{"Unknown"};
-  uint8_t desired_temp_{18};
+  uint8_t desired_temp_{16};
   bool aux_heat_{false};
   bool echo_sleep_{false};
   bool swing_{false};
@@ -229,7 +229,7 @@ class MideaRS485Component : public PollingComponent {
     if (temp_number_) {
       float temp = (ESP32_Midea_RS485.State.SetTemp > 0)
                    ? (float)ESP32_Midea_RS485.State.SetTemp
-                   : 18.0f;
+                   : 16.0f;
       temp_number_->publish_state(temp);
       desired_temp_ = (uint8_t)temp;
     }

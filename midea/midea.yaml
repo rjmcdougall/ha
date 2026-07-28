@@ -104,7 +104,7 @@ number:
     name: "AC Set Temp"
     id: ac_set_temp
     optimistic: true
-    min_value: 18
+    min_value: 16
     max_value: 32
     step: 1
 
