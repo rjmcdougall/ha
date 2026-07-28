@@ -1,0 +1,135 @@
+# Midea RS485 ESPHome config — converted from custom component to external_component
+# Copy the components/ directory alongside this file in /config/esphome/
+
+esphome:
+  name: midea
+
+esp32:
+  board: wemos_d1_mini32
+  framework:
+    type: arduino
+
+# --- Update these for your network ---
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+
+api:
+  encryption:
+    key: "hdkuWGUju81LwCBr22iOeX0AU4KabxTCu7IGXzTUmZo="
+
+ota:
+    - platform: esphome
+      password: "3aabfa181ac7f6c594d5fe2ebc74a8aa"
+
+logger:
+
+# -------------------------------------------------------
+# External component replaces the old custom component
+# -------------------------------------------------------
+external_components:
+  - source:
+      type: local
+      path: components
+
+# The library is pulled in automatically by the component,
+# but you can also keep it here as a fallback:
+# esphome:
+#   libraries:
+#     - "https://github.com/Bunicutz/ESP32_Midea_RS485.git"
+
+midea_rs485:
+  id: my_midea
+  update_interval: 10s
+  # Pin defaults match the original bunicutz_AC.h — override if your wiring differs
+  di_pin: 16
+  ro_pin: 17
+  de_pin: 22
+  master_id: 0
+  slave_id: 0
+  master_send_time: 40
+  slave_timeout: 100
+  # Temperature sensors
+  t1_temp:
+    name: "AC In Air Temp"
+  t2a_temp:
+    name: "AC Coil A Temp"
+  t2b_temp:
+    name: "AC Coil B Temp"
+  t3_temp:
+    name: "AC Outdoor Temp"
+  not_responding:
+    name: "AC Com State"
+  # Wire the control entities below so the component can read & write them
+  mode_select: my_ac_mode
+  fan_mode_select: my_ac_fan_mode
+  set_temp: ac_set_temp
+  aux_heat: ac_aux_heat
+  echo_sleep: ac_echo_sleep
+  swing: ac_swing
+  vent: ac_vent
+  lock: ac_lock
+
+# -------------------------------------------------------
+# Control entities — same as before, no on_value: needed
+# -------------------------------------------------------
+select:
+  - platform: template
+    name: "AC Mode"
+    optimistic: true
+    id: my_ac_mode
+    options:
+      - "Off"
+      - "Auto"
+      - "Cool"
+      - "Dry"
+      - "Heat"
+      - "Fan"
+      - "Unknown"
+
+  - platform: template
+    name: "AC Fan Mode"
+    optimistic: true
+    id: my_ac_fan_mode
+    options:
+      - "Auto"
+      - "High"
+      - "Medium"
+      - "Low"
+      - "Unknown"
+
+number:
+  - platform: template
+    name: "AC Set Temp"
+    id: ac_set_temp
+    optimistic: true
+    min_value: 18
+    max_value: 32
+    step: 1
+
+switch:
+  - platform: template
+    name: "Auxiliary Heat"
+    id: ac_aux_heat
+    optimistic: true
+
+  - platform: template
+    name: "Echo/Sleep"
+    id: ac_echo_sleep
+    optimistic: true
+
+  - platform: template
+    name: "Swing"
+    id: ac_swing
+    optimistic: true
+
+  - platform: template
+    name: "Vent"
+    id: ac_vent
+    optimistic: true
+
+  - platform: template
+    name: "Lock"
+    id: ac_lock
+    optimistic: true
