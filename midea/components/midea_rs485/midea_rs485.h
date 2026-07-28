@@ -90,7 +90,8 @@ class MideaRS485Component : public climate::Climate, public PollingComponent {
   // overridden by any `visual:` block in the YAML.
   climate::ClimateTraits traits() override {
     auto traits = climate::ClimateTraits();
-    traits.set_supports_current_temperature(true);
+    // ESPHome 2026.x replaced the set_supports_* booleans with feature flags.
+    traits.set_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
     traits.set_supported_modes({
         climate::CLIMATE_MODE_OFF,
         climate::CLIMATE_MODE_HEAT_COOL,  // Midea "Auto"
