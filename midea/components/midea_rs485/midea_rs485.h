@@ -1,19 +1,26 @@
 #pragma once
 
+#include <cmath>
+
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
-#include "esphome/components/select/select.h"
-#include "esphome/components/number/number.h"
 #include "esphome/components/switch/switch.h"
+#include "esphome/components/climate/climate.h"
 #include <esp32_midea_RS485.h>
 
 namespace esphome {
 namespace midea_rs485 {
 
-class MideaRS485Component : public PollingComponent {
+// A native ESPHome climate entity that drives a Midea heat pump over the XYE
+// (RS485) bus. Home Assistant renders this as a full thermostat card: HVAC
+// mode, target temperature, current temperature, fan speed and swing.
+//
+// The extra return/coil/outdoor temperatures and the aux-heat / sleep / vent /
+// lock toggles are exposed as separate sensor/switch entities wired in via the
+// setters below.
+class MideaRS485Component : public climate::Climate, public PollingComponent {
  public:
   // --- Configuration setters (called from generated code) ---
-
   void set_pins(uint8_t di_pin, uint8_t ro_pin, uint8_t de_pin) {
     di_pin_ = di_pin;
     ro_pin_ = ro_pin;
@@ -28,20 +35,16 @@ class MideaRS485Component : public PollingComponent {
     timeout_ = timeout;
   }
 
-  // --- Sensor setters ---
+  // --- Diagnostic sensor setters ---
   void set_t1_sensor(sensor::Sensor *s) { t1_sensor_ = s; }
   void set_t2a_sensor(sensor::Sensor *s) { t2a_sensor_ = s; }
   void set_t2b_sensor(sensor::Sensor *s) { t2b_sensor_ = s; }
   void set_t3_sensor(sensor::Sensor *s) { t3_sensor_ = s; }
   void set_not_responding_sensor(sensor::Sensor *s) { not_responding_sensor_ = s; }
 
-  // --- Control entity setters ---
-  void set_mode_select(select::Select *s) { mode_select_ = s; }
-  void set_fan_mode_select(select::Select *s) { fan_mode_select_ = s; }
-  void set_temp_number(number::Number *n) { temp_number_ = n; }
+  // --- Auxiliary switch setters (features with no climate equivalent) ---
   void set_aux_heat_switch(switch_::Switch *s) { aux_heat_switch_ = s; }
   void set_echo_sleep_switch(switch_::Switch *s) { echo_sleep_switch_ = s; }
-  void set_swing_switch(switch_::Switch *s) { swing_switch_ = s; }
   void set_vent_switch(switch_::Switch *s) { vent_switch_ = s; }
   void set_lock_switch(switch_::Switch *s) { lock_switch_ = s; }
 
@@ -51,86 +54,114 @@ class MideaRS485Component : public PollingComponent {
     ESP32_Midea_RS485.begin(&Serial2, ro_pin_, di_pin_, de_pin_,
                              master_id_, slave_id_, send_time_, timeout_);
 
-    // Subscribe to user changes on control entities so we can forward them to the AC.
-    // The updating_internal_ guard prevents feedback loops when we publish_state()
-    // back to these entities from update().
-
-    if (mode_select_) {
-      mode_select_->add_on_state_callback([this](size_t) {
-        const std::string &value = mode_select_->state;
-        if (!updating_internal_ && value != desired_mode_) {
-          desired_mode_ = value;
-          update_command_ = true;
-        }
-      });
-    }
-    if (fan_mode_select_) {
-      fan_mode_select_->add_on_state_callback([this](size_t) {
-        const std::string &value = fan_mode_select_->state;
-        if (!updating_internal_ && value != desired_fan_mode_) {
-          desired_fan_mode_ = value;
-          update_command_ = true;
-        }
-      });
-    }
-    if (temp_number_) {
-      temp_number_->add_on_state_callback([this](float value) {
-        if (!updating_internal_ && (uint8_t)value != desired_temp_) {
-          desired_temp_ = (uint8_t)value;
-          update_command_ = true;
-        }
-      });
-    }
+    // Auxiliary toggles are plain switches; forward user changes to the AC.
+    // updating_internal_ guards against the feedback loop created when we
+    // publish_state() back to these switches from update().
     if (aux_heat_switch_) {
       aux_heat_switch_->add_on_state_callback([this](bool value) {
-        if (!updating_internal_ && value != aux_heat_) {
-          aux_heat_ = value;
-          update_command_ = true;
-        }
+        if (!updating_internal_)
+          ESP32_Midea_RS485.SetAuxHeat_Turbo(value ? MIDEA_AC_ACTIVE : MIDEA_AC_INACTIVE);
       });
     }
     if (echo_sleep_switch_) {
       echo_sleep_switch_->add_on_state_callback([this](bool value) {
-        if (!updating_internal_ && value != echo_sleep_) {
-          echo_sleep_ = value;
-          update_command_ = true;
-        }
-      });
-    }
-    if (swing_switch_) {
-      swing_switch_->add_on_state_callback([this](bool value) {
-        if (!updating_internal_ && value != swing_) {
-          swing_ = value;
-          update_command_ = true;
-        }
+        if (!updating_internal_)
+          ESP32_Midea_RS485.SetEcho_Sleep(value ? MIDEA_AC_ACTIVE : MIDEA_AC_INACTIVE);
       });
     }
     if (vent_switch_) {
       vent_switch_->add_on_state_callback([this](bool value) {
-        if (!updating_internal_ && value != vent_) {
-          vent_ = value;
-          update_command_ = true;
-        }
+        if (!updating_internal_)
+          ESP32_Midea_RS485.SetVent(value ? MIDEA_AC_ACTIVE : MIDEA_AC_INACTIVE);
       });
     }
-    // Lock/unlock acts immediately, not deferred to next update cycle
+    // Lock/unlock acts immediately, not deferred to the next update cycle.
     if (lock_switch_) {
       lock_switch_->add_on_state_callback([this](bool value) {
-        if (value) {
+        if (value)
           ESP32_Midea_RS485.Lock();
-        } else {
+        else
           ESP32_Midea_RS485.Unlock();
-        }
       });
     }
   }
 
-  void update() override {
-    if (update_command_) {
-      apply_desired_state_();
-      update_command_ = false;
+  // Advertise what this thermostat can do. Visual min/max/step defaults here are
+  // overridden by any `visual:` block in the YAML.
+  climate::ClimateTraits traits() override {
+    auto traits = climate::ClimateTraits();
+    traits.set_supports_current_temperature(true);
+    traits.set_supported_modes({
+        climate::CLIMATE_MODE_OFF,
+        climate::CLIMATE_MODE_HEAT_COOL,  // Midea "Auto"
+        climate::CLIMATE_MODE_COOL,
+        climate::CLIMATE_MODE_HEAT,
+        climate::CLIMATE_MODE_DRY,
+        climate::CLIMATE_MODE_FAN_ONLY,
+    });
+    traits.set_supported_fan_modes({
+        climate::CLIMATE_FAN_AUTO,
+        climate::CLIMATE_FAN_LOW,
+        climate::CLIMATE_FAN_MEDIUM,
+        climate::CLIMATE_FAN_HIGH,
+    });
+    traits.set_supported_swing_modes({
+        climate::CLIMATE_SWING_OFF,
+        climate::CLIMATE_SWING_VERTICAL,
+    });
+    traits.set_visual_min_temperature(16);
+    traits.set_visual_max_temperature(32);
+    traits.set_visual_temperature_step(1);
+    return traits;
+  }
+
+  // Handle a command from Home Assistant. The library queues the change and
+  // transmits it on the next Update() cycle; we optimistically reflect it so the
+  // UI is responsive, and the next poll re-syncs from the AC's actual state.
+  void control(const climate::ClimateCall &call) override {
+    if (call.get_mode().has_value()) {
+      climate::ClimateMode mode = *call.get_mode();
+      switch (mode) {
+        case climate::CLIMATE_MODE_OFF:       ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_OFF);  break;
+        case climate::CLIMATE_MODE_HEAT_COOL: ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_AUTO); break;
+        case climate::CLIMATE_MODE_COOL:      ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_COOL); break;
+        case climate::CLIMATE_MODE_HEAT:      ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_HEAT); break;
+        case climate::CLIMATE_MODE_DRY:       ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_DRY);  break;
+        case climate::CLIMATE_MODE_FAN_ONLY:  ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_FAN);  break;
+        default: break;
+      }
+      this->mode = mode;
     }
 
+    if (call.get_target_temperature().has_value()) {
+      float t = *call.get_target_temperature();
+      ESP32_Midea_RS485.SetTemp((uint8_t) lroundf(t));
+      this->target_temperature = t;
+    }
+
+    if (call.get_fan_mode().has_value()) {
+      climate::ClimateFanMode fan = *call.get_fan_mode();
+      switch (fan) {
+        case climate::CLIMATE_FAN_AUTO:   ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_AUTO);   break;
+        case climate::CLIMATE_FAN_LOW:    ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_LOW);    break;
+        case climate::CLIMATE_FAN_MEDIUM: ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_MEDIUM); break;
+        case climate::CLIMATE_FAN_HIGH:   ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_HIGH);   break;
+        default: break;
+      }
+      this->fan_mode = fan;
+    }
+
+    if (call.get_swing_mode().has_value()) {
+      climate::ClimateSwingMode swing = *call.get_swing_mode();
+      ESP32_Midea_RS485.SetSwing(swing == climate::CLIMATE_SWING_VERTICAL ? MIDEA_AC_ACTIVE
+                                                                          : MIDEA_AC_INACTIVE);
+      this->swing_mode = swing;
+    }
+
+    this->publish_state();
+  }
+
+  void update() override {
     ESP32_Midea_RS485.Update();
 
     if (ESP32_Midea_RS485.State.ACNotResponding == 0) {
@@ -148,6 +179,44 @@ class MideaRS485Component : public PollingComponent {
   }
 
  protected:
+  // Read the AC's actual reported state and publish it to the climate entity and
+  // the auxiliary switches.
+  void publish_ac_state_() {
+    switch (ESP32_Midea_RS485.State.OpMode) {
+      case MIDEA_AC_OPMODE_OFF:  this->mode = climate::CLIMATE_MODE_OFF;       break;
+      case MIDEA_AC_OPMODE_AUTO: this->mode = climate::CLIMATE_MODE_HEAT_COOL; break;
+      case MIDEA_AC_OPMODE_COOL: this->mode = climate::CLIMATE_MODE_COOL;      break;
+      case MIDEA_AC_OPMODE_HEAT: this->mode = climate::CLIMATE_MODE_HEAT;      break;
+      case MIDEA_AC_OPMODE_DRY:  this->mode = climate::CLIMATE_MODE_DRY;       break;
+      case MIDEA_AC_OPMODE_FAN:  this->mode = climate::CLIMATE_MODE_FAN_ONLY;  break;
+      default: break;
+    }
+
+    switch (ESP32_Midea_RS485.State.FanMode) {
+      case MIDEA_AC_FANMODE_AUTO:   this->fan_mode = climate::CLIMATE_FAN_AUTO;   break;
+      case MIDEA_AC_FANMODE_LOW:    this->fan_mode = climate::CLIMATE_FAN_LOW;    break;
+      case MIDEA_AC_FANMODE_MEDIUM: this->fan_mode = climate::CLIMATE_FAN_MEDIUM; break;
+      case MIDEA_AC_FANMODE_HIGH:   this->fan_mode = climate::CLIMATE_FAN_HIGH;   break;
+      default: break;
+    }
+
+    bool swing_on = (ESP32_Midea_RS485.State.OperatingFlags & 0x04) > 0;
+    this->swing_mode = swing_on ? climate::CLIMATE_SWING_VERTICAL : climate::CLIMATE_SWING_OFF;
+
+    if (ESP32_Midea_RS485.State.SetTemp > 0)
+      this->target_temperature = (float) ESP32_Midea_RS485.State.SetTemp;
+    this->current_temperature = (float) ESP32_Midea_RS485.State.T1Temp;
+
+    this->publish_state();
+
+    if (aux_heat_switch_)
+      aux_heat_switch_->publish_state((ESP32_Midea_RS485.State.OperatingFlags & 0x02) > 0);
+    if (echo_sleep_switch_)
+      echo_sleep_switch_->publish_state((ESP32_Midea_RS485.State.OperatingFlags & 0x01) > 0);
+    if (vent_switch_)
+      vent_switch_->publish_state((ESP32_Midea_RS485.State.OperatingFlags & 0x88) > 0);
+  }
+
   uint8_t di_pin_{16}, ro_pin_{17}, de_pin_{4};
   uint8_t master_id_{0}, slave_id_{0};
   uint8_t send_time_{40}, timeout_{100};
@@ -158,103 +227,12 @@ class MideaRS485Component : public PollingComponent {
   sensor::Sensor *t3_sensor_{nullptr};
   sensor::Sensor *not_responding_sensor_{nullptr};
 
-  select::Select *mode_select_{nullptr};
-  select::Select *fan_mode_select_{nullptr};
-  number::Number *temp_number_{nullptr};
   switch_::Switch *aux_heat_switch_{nullptr};
   switch_::Switch *echo_sleep_switch_{nullptr};
-  switch_::Switch *swing_switch_{nullptr};
   switch_::Switch *vent_switch_{nullptr};
   switch_::Switch *lock_switch_{nullptr};
 
-  bool update_command_{false};
   bool updating_internal_{false};
-  std::string desired_mode_{"Unknown"};
-  std::string desired_fan_mode_{"Unknown"};
-  uint8_t desired_temp_{16};
-  bool aux_heat_{false};
-  bool echo_sleep_{false};
-  bool swing_{false};
-  bool vent_{false};
-
-  void apply_desired_state_() {
-    if (desired_mode_ == "Auto")       ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_AUTO);
-    else if (desired_mode_ == "Off")   ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_OFF);
-    else if (desired_mode_ == "Cool")  ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_COOL);
-    else if (desired_mode_ == "Heat")  ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_HEAT);
-    else if (desired_mode_ == "Dry")   ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_DRY);
-    else if (desired_mode_ == "Fan")   ESP32_Midea_RS485.SetMode(MIDEA_AC_OPMODE_FAN);
-
-    if (desired_fan_mode_ == "Auto")       ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_AUTO);
-    else if (desired_fan_mode_ == "High")   ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_HIGH);
-    else if (desired_fan_mode_ == "Medium") ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_MEDIUM);
-    else if (desired_fan_mode_ == "Low")    ESP32_Midea_RS485.SetFanMode(MIDEA_AC_FANMODE_LOW);
-
-    ESP32_Midea_RS485.SetTemp(desired_temp_);
-    ESP32_Midea_RS485.SetAuxHeat_Turbo(aux_heat_ ? MIDEA_AC_ACTIVE : MIDEA_AC_INACTIVE);
-    ESP32_Midea_RS485.SetEcho_Sleep(echo_sleep_ ? MIDEA_AC_ACTIVE : MIDEA_AC_INACTIVE);
-    ESP32_Midea_RS485.SetSwing(swing_ ? MIDEA_AC_ACTIVE : MIDEA_AC_INACTIVE);
-    ESP32_Midea_RS485.SetVent(vent_ ? MIDEA_AC_ACTIVE : MIDEA_AC_INACTIVE);
-  }
-
-  void publish_ac_state_() {
-    if (mode_select_) {
-      std::string mode;
-      switch (ESP32_Midea_RS485.State.OpMode) {
-        case MIDEA_AC_OPMODE_AUTO: mode = "Auto"; break;
-        case MIDEA_AC_OPMODE_OFF:  mode = "Off";  break;
-        case MIDEA_AC_OPMODE_COOL: mode = "Cool"; break;
-        case MIDEA_AC_OPMODE_HEAT: mode = "Heat"; break;
-        case MIDEA_AC_OPMODE_DRY:  mode = "Dry";  break;
-        case MIDEA_AC_OPMODE_FAN:  mode = "Fan";  break;
-        default:                   mode = "Unknown"; break;
-      }
-      mode_select_->publish_state(mode);
-      desired_mode_ = mode;
-    }
-
-    if (fan_mode_select_) {
-      std::string fan_mode;
-      switch (ESP32_Midea_RS485.State.FanMode) {
-        case MIDEA_AC_FANMODE_AUTO:   fan_mode = "Auto";   break;
-        case MIDEA_AC_FANMODE_HIGH:   fan_mode = "High";   break;
-        case MIDEA_AC_FANMODE_MEDIUM: fan_mode = "Medium"; break;
-        case MIDEA_AC_FANMODE_LOW:    fan_mode = "Low";    break;
-        default:                      fan_mode = "Unknown"; break;
-      }
-      fan_mode_select_->publish_state(fan_mode);
-      desired_fan_mode_ = fan_mode;
-    }
-
-    if (temp_number_) {
-      float temp = (ESP32_Midea_RS485.State.SetTemp > 0)
-                   ? (float)ESP32_Midea_RS485.State.SetTemp
-                   : 16.0f;
-      temp_number_->publish_state(temp);
-      desired_temp_ = (uint8_t)temp;
-    }
-
-    if (aux_heat_switch_) {
-      bool v = (ESP32_Midea_RS485.State.OperatingFlags & 0x02) > 0;
-      aux_heat_switch_->publish_state(v);
-      aux_heat_ = v;
-    }
-    if (echo_sleep_switch_) {
-      bool v = (ESP32_Midea_RS485.State.OperatingFlags & 0x01) > 0;
-      echo_sleep_switch_->publish_state(v);
-      echo_sleep_ = v;
-    }
-    if (vent_switch_) {
-      bool v = (ESP32_Midea_RS485.State.OperatingFlags & 0x88) > 0;
-      vent_switch_->publish_state(v);
-      vent_ = v;
-    }
-    if (swing_switch_) {
-      bool v = (ESP32_Midea_RS485.State.OperatingFlags & 0x04) > 0;
-      swing_switch_->publish_state(v);
-      swing_ = v;
-    }
-  }
 };
 
 }  // namespace midea_rs485

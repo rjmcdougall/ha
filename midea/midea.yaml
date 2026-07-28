@@ -1,4 +1,4 @@
-# Midea RS485 ESPHome config — converted from custom component to external_component
+# Midea RS485 ESPHome config — exposes the heat pump as a native HA thermostat
 # Copy the components/ directory alongside this file in /config/esphome/
 
 esphome:
@@ -39,8 +39,14 @@ external_components:
 #   libraries:
 #     - "https://github.com/Bunicutz/ESP32_Midea_RS485.git"
 
+# -------------------------------------------------------
+# The component IS the thermostat: a single climate entity
+# (mode, target temp, current temp, fan speed, swing) plus
+# diagnostic temperature sensors and a few auxiliary toggles.
+# -------------------------------------------------------
 midea_rs485:
   id: my_midea
+  name: "Heat Pump"
   update_interval: 10s
   # Pin defaults match the original bunicutz_AC.h — override if your wiring differs
   di_pin: 16
@@ -50,7 +56,12 @@ midea_rs485:
   slave_id: 0
   master_send_time: 40
   slave_timeout: 100
-  # Temperature sensors
+  # Thermostat setpoint range shown in Home Assistant
+  visual:
+    min_temperature: 16
+    max_temperature: 32
+    temperature_step: 1
+  # Diagnostic temperature sensors
   t1_temp:
     name: "AC In Air Temp"
   t2a_temp:
@@ -61,53 +72,15 @@ midea_rs485:
     name: "AC Outdoor Temp"
   not_responding:
     name: "AC Com State"
-  # Wire the control entities below so the component can read & write them
-  mode_select: my_ac_mode
-  fan_mode_select: my_ac_fan_mode
-  set_temp: ac_set_temp
+  # Auxiliary features with no climate equivalent — wired to the switches below
   aux_heat: ac_aux_heat
   echo_sleep: ac_echo_sleep
-  swing: ac_swing
   vent: ac_vent
   lock: ac_lock
 
 # -------------------------------------------------------
-# Control entities — same as before, no on_value: needed
+# Auxiliary toggles (aux heat / sleep / vent / panel lock)
 # -------------------------------------------------------
-select:
-  - platform: template
-    name: "AC Mode"
-    optimistic: true
-    id: my_ac_mode
-    options:
-      - "Off"
-      - "Auto"
-      - "Cool"
-      - "Dry"
-      - "Heat"
-      - "Fan"
-      - "Unknown"
-
-  - platform: template
-    name: "AC Fan Mode"
-    optimistic: true
-    id: my_ac_fan_mode
-    options:
-      - "Auto"
-      - "High"
-      - "Medium"
-      - "Low"
-      - "Unknown"
-
-number:
-  - platform: template
-    name: "AC Set Temp"
-    id: ac_set_temp
-    optimistic: true
-    min_value: 16
-    max_value: 32
-    step: 1
-
 switch:
   - platform: template
     name: "Auxiliary Heat"
@@ -117,11 +90,6 @@ switch:
   - platform: template
     name: "Echo/Sleep"
     id: ac_echo_sleep
-    optimistic: true
-
-  - platform: template
-    name: "Swing"
-    id: ac_swing
     optimistic: true
 
   - platform: template
