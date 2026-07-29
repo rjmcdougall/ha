@@ -46,7 +46,7 @@ external_components:
 # -------------------------------------------------------
 midea_rs485:
   id: my_midea
-  name: "Heat Pump"
+  name: "Loft Heat Pump"
   update_interval: 10s
   # Pin defaults match the original bunicutz_AC.h — override if your wiring differs
   di_pin: 16
